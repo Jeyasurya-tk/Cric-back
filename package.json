@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx server/index.ts",
-    "build": "esbuild server/index.ts --platform=node --bundle --format=esm --outfile=dist/index.cjs --external:express --external:mongoose --external:pg --external:drizzle-orm",
+    "build": "npx esbuild server/index.ts --platform=node --bundle --format=cjs --outfile=dist/index.cjs --external:express --external:mongoose --external:pg --external:drizzle-orm --external:cors --external:dotenv --external:drizzle-zod --external:express-session --external:memorystore --external:passport --external:passport-local --external:socket.io --external:ws --external:zod --external:zod-validation-error",
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "db:push": "drizzle-kit push",
     "db:clear": "tsx script/clear-db.ts"
