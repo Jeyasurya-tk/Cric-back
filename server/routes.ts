@@ -1326,6 +1326,25 @@ export async function registerRoutes(
     res.json(updated);
   });
 
+  app.post("/api/notifications", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    const { targetUserId, title, message, type } = req.body;
+
+    if (!targetUserId || !message) {
+      return res.status(400).json({ message: "Target user and message are required" });
+    }
+
+    const notification = await storage.createNotification({
+      userId: targetUserId,
+      title: title || "New Message",
+      message: message,
+      type: type || 'message',
+      fromId: userId
+    });
+
+    res.status(201).json(notification);
+  });
+
   return httpServer;
 }
 
