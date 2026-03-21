@@ -1326,6 +1326,13 @@ export async function registerRoutes(
     res.json(updated);
   });
 
+  app.delete("/api/notifications", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+    await storage.clearNotifications(userId);
+    res.status(204).end();
+  });
+
   app.post("/api/notifications", async (req, res) => {
     const userId = req.headers["x-user-id"] as string;
     const { targetUserId, title, message, type } = req.body;
