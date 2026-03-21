@@ -17,6 +17,7 @@ export interface IStorage {
   createNotification(notification: any): Promise<any>;
   getNotifications(userId: string): Promise<any[]>;
   markNotificationRead(id: string): Promise<any>;
+  clearNotifications(userId: string): Promise<any>;
 
   // Tournament operations
   createTournament(tournamentData: any): Promise<any>;
@@ -1088,23 +1089,27 @@ export class MongoStorage implements IStorage {
   async createCollection(collectionData: any): Promise<any> {
     let playerIds: string[] = [];
     
-    if (collectionData.memberId) {
+    if (collectionData.memberIds && Array.isArray(collectionData.memberIds)) {
+      playerIds = collectionData.memberIds.map((id: any) => id.toString());
+    } else if (collectionData.memberId) {
       playerIds = [collectionData.memberId.toString()];
+    } else if (collectionData.teamIds && Array.isArray(collectionData.teamIds)) {
+      const teams = await TeamModel.find({ _id: { $in: collectionData.teamIds } });
+      // Bill the team admin (captain) for each team
+      playerIds = teams.map(team => team.adminId?.toString()).filter(Boolean) as string[];
     } else if (collectionData.teamId) {
       const team = await TeamModel.findById(collectionData.teamId);
       if (!team) throw new Error("Team not found");
-      playerIds = team.players?.map((p: any) => p.toString()) || [];
+      // Bill the team admin (captain)
+      playerIds = [team.adminId?.toString()].filter(Boolean) as string[];
     } else if (collectionData.tournamentId) {
       const tournament = await TournamentModel.findById(collectionData.tournamentId).populate('teams');
       if (!tournament) throw new Error("Tournament not found");
       
-      const allPlayers = new Set<string>();
-      (tournament.teams as any[] || []).forEach(team => {
-        team.players?.forEach((p: any) => allPlayers.add(p.toString()));
-      });
-      playerIds = Array.from(allPlayers);
+      // Bill each team's admin (captain) in the tournament
+      playerIds = (tournament.teams as any[] || []).map(team => team.adminId?.toString()).filter(Boolean);
     } else {
-      throw new Error("Either teamId, tournamentId or memberId is required");
+      throw new Error("Target selection is required");
     }
 
     const amountPerMember = parseFloat(collectionData.amountPerMember);
@@ -1977,6 +1982,10 @@ export class MongoStorage implements IStorage {
 
   async markNotificationRead(id: string): Promise<any> {
     return await NotificationModel.findByIdAndUpdate(id, { read: true }, { new: true });
+  }
+
+  async clearNotifications(userId: string): Promise<any> {
+    return await NotificationModel.deleteMany({ userId });
   }
 }
 
