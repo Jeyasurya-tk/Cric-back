@@ -1088,7 +1088,9 @@ export class MongoStorage implements IStorage {
   async createCollection(collectionData: any): Promise<any> {
     let playerIds: string[] = [];
     
-    if (collectionData.teamId) {
+    if (collectionData.memberId) {
+      playerIds = [collectionData.memberId.toString()];
+    } else if (collectionData.teamId) {
       const team = await TeamModel.findById(collectionData.teamId);
       if (!team) throw new Error("Team not found");
       playerIds = team.players?.map((p: any) => p.toString()) || [];
@@ -1102,7 +1104,7 @@ export class MongoStorage implements IStorage {
       });
       playerIds = Array.from(allPlayers);
     } else {
-      throw new Error("Either teamId or tournamentId is required");
+      throw new Error("Either teamId, tournamentId or memberId is required");
     }
 
     const amountPerMember = parseFloat(collectionData.amountPerMember);
@@ -1111,7 +1113,7 @@ export class MongoStorage implements IStorage {
     const collection = new CollectionModel({
       ...collectionData,
       expectedAmt,
-      collectedAmt: 0
+      collectedAmt: collectionData.status === 'Paid' ? expectedAmt : 0
     });
     const savedCollection = await collection.save();
 
@@ -1120,8 +1122,8 @@ export class MongoStorage implements IStorage {
       const payments = playerIds.map(playerId => ({
         memberId: playerId,
         collectionId: savedCollection._id,
-        status: 'Pending',
-        amount: 0 // Amount paid so far
+        status: collectionData.status || 'Pending',
+        amount: collectionData.status === 'Paid' ? amountPerMember : 0 
       }));
       await PaymentModel.insertMany(payments);
     }
