@@ -11,6 +11,7 @@ const userSchema = new mongoose.Schema({
   profileImage: { type: String },
   isApproved: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
+  canManageAssets: { type: Boolean, default: false },
   teams: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Team' }],
   followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
@@ -257,6 +258,16 @@ const expenseSchema = new mongoose.Schema({
 });
 
 export const Expense = mongoose.models.Expense || mongoose.model("Expense", expenseSchema);
+
+// Team Asset Schema
+const teamAssetSchema = new mongoose.Schema({
+  amount: { type: Number, required: true },
+  date: { type: Date, default: Date.now },
+  description: { type: String, default: "Team Asset" },
+  addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+});
+
+export const TeamAsset = mongoose.models.TeamAsset || mongoose.model("TeamAsset", teamAssetSchema);
 
 // Notification Schema
 const notificationSchema = new mongoose.Schema({
