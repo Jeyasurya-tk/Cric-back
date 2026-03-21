@@ -261,9 +261,10 @@ export const Expense = mongoose.models.Expense || mongoose.model("Expense", expe
 // Notification Schema
 const notificationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  fromId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   title: { type: String, required: true },
   message: { type: String, required: true },
-  type: { type: String, enum: ['payment', 'match', 'tournament', 'system'], default: 'match' },
+  type: { type: String, enum: ['payment', 'match', 'tournament', 'system', 'message'], default: 'match' },
   read: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });
