@@ -1137,6 +1137,29 @@ export async function registerRoutes(
     res.json(expenses);
   });
 
+  // Team Asset Routes
+  app.post("/api/team-assets", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    const user = await storage.getUser(userId);
+
+    if (!user || user.role !== 'developer') {
+      return res.status(403).json({ message: "Only developers can manage team assets" });
+    }
+
+    const asset = await storage.createTeamAsset(req.body);
+    res.status(201).json(asset);
+  });
+
+  app.get("/api/team-assets", async (req, res) => {
+    const assets = await storage.getTeamAssets();
+    res.json(assets);
+  });
+
+  app.get("/api/team-assets/total", async (req, res) => {
+    const total = await storage.getTeamAssetsTotal();
+    res.json({ total });
+  });
+
   // Tournament Routes
   app.post("/api/tournaments", async (req, res) => {
     const userId = req.headers["x-user-id"] as string;
