@@ -1,4 +1,4 @@
-import { User as UserModel, Team as TeamModel, Player as PlayerModel, Match as MatchModel, Collection as CollectionModel, Payment as PaymentModel, Tournament as TournamentModel, Expense as ExpenseModel, Notification as NotificationModel } from "@shared/schema";
+import { User as UserModel, Team as TeamModel, Player as PlayerModel, Match as MatchModel, Collection as CollectionModel, Payment as PaymentModel, Tournament as TournamentModel, Expense as ExpenseModel, Notification as NotificationModel, TeamAsset as TeamAssetModel } from "@shared/schema";
 import mongoose from "mongoose";
 
 export interface IStorage {
@@ -33,6 +33,14 @@ export interface IStorage {
   updateTournamentStandings(tournamentId: string): Promise<void>;
   declareWalkover(matchId: string, winningTeamId: string, reason: string): Promise<any>;
   generatePlayoffs(tournamentId: string): Promise<any>;
+
+  // Asset operations
+  createTeamAsset(assetData: any): Promise<any>;
+  getTeamAssets(): Promise<any[]>;
+  getTeamAssetsTotal(): Promise<number>;
+
+  // Payment operations
+  deletePayment(id: string): Promise<any>;
 }
 
 export class MongoStorage implements IStorage {
@@ -1089,26 +1097,32 @@ export class MongoStorage implements IStorage {
   async createCollection(collectionData: any): Promise<any> {
     let playerIds: string[] = [];
     
-    if (collectionData.memberIds && Array.isArray(collectionData.memberIds)) {
+    if (collectionData.memberIds && Array.isArray(collectionData.memberIds) && collectionData.memberIds.length > 0) {
       playerIds = collectionData.memberIds.map((id: any) => id.toString());
     } else if (collectionData.memberId) {
       playerIds = [collectionData.memberId.toString()];
-    } else if (collectionData.teamIds && Array.isArray(collectionData.teamIds)) {
+    }
+
+    if (collectionData.teamIds && Array.isArray(collectionData.teamIds) && collectionData.teamIds.length > 0) {
       const teams = await TeamModel.find({ _id: { $in: collectionData.teamIds } });
-      // Bill the team admin (captain) for each team
-      playerIds = teams.map(team => team.adminId?.toString()).filter(Boolean) as string[];
+      const teamCaptains = teams.map(team => team.adminId?.toString()).filter(Boolean) as string[];
+      playerIds = Array.from(new Set([...playerIds, ...teamCaptains]));
     } else if (collectionData.teamId) {
       const team = await TeamModel.findById(collectionData.teamId);
-      if (!team) throw new Error("Team not found");
-      // Bill the team admin (captain)
-      playerIds = [team.adminId?.toString()].filter(Boolean) as string[];
-    } else if (collectionData.tournamentId) {
+      if (team && team.adminId) {
+        playerIds = Array.from(new Set([...playerIds, team.adminId.toString()]));
+      }
+    }
+
+    if (playerIds.length === 0 && collectionData.tournamentId) {
       const tournament = await TournamentModel.findById(collectionData.tournamentId).populate('teams');
       if (!tournament) throw new Error("Tournament not found");
       
       // Bill each team's admin (captain) in the tournament
       playerIds = (tournament.teams as any[] || []).map(team => team.adminId?.toString()).filter(Boolean);
-    } else {
+    } 
+
+    if (playerIds.length === 0) {
       throw new Error("Target selection is required");
     }
 
@@ -1930,6 +1944,8 @@ export class MongoStorage implements IStorage {
     const partialCount = payments.filter(p => p.status === 'Partial').length;
     const pendingCount = payments.filter(p => p.status === 'Pending').length;
 
+    const totalAssets = await this.getTeamAssetsTotal();
+
     const recentMatches = await MatchModel.find().populate('teamA teamB').sort({ _id: -1 }).limit(5);
 
     // If userId is provided and user is a player, return player-specific stats
@@ -1960,6 +1976,7 @@ export class MongoStorage implements IStorage {
       totalExpected,
       totalCollected,
       totalExpenses,
+      totalAssets,
       paymentStats: {
         paid: paidCount,
         partial: partialCount,
@@ -1986,6 +2003,21 @@ export class MongoStorage implements IStorage {
 
   async clearNotifications(userId: string): Promise<any> {
     return await NotificationModel.deleteMany({ userId });
+  }
+
+  // Asset operations
+  async createTeamAsset(assetData: any): Promise<any> {
+    const asset = new TeamAssetModel(assetData);
+    return await asset.save();
+  }
+
+  async getTeamAssets(): Promise<any[]> {
+    return await TeamAssetModel.find().sort({ date: -1 });
+  }
+
+  async getTeamAssetsTotal(): Promise<number> {
+    const assets = await TeamAssetModel.find();
+    return assets.reduce((acc, a) => acc + (a.amount || 0), 0);
   }
 }
 
