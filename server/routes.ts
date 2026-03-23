@@ -123,7 +123,7 @@ export async function registerRoutes(
          // This block shouldn't be reached if it was found above, 
          // but we keep the logic clean.
       }
-      return res.status(401).json({ message: "Sorry, you need to register with this mobile number." });
+      return res.status(401).json({ message: "Sorry, you have need to registered with this mobile number." });
     }
 
     // Role-based password override for public
@@ -144,7 +144,7 @@ export async function registerRoutes(
     }
 
     res.json({
-      ...(user.toObject ? user.toObject() : user),
+      ...user.toObject ? user.toObject() : user,
       welcomeMessage: `Welcome@${user.fullName}.`
     });
   });
@@ -921,12 +921,11 @@ export async function registerRoutes(
                    }
                  }
                }
-              }
             }
-          
+          }
         
-
-           } else if (matchInnings === 3) {
+      }
+    } else if (matchInnings === 3) {
       if (isSuperOverOversCompleted || isWicketsCompleted) {
         // End of first super over innings
         matchInnings = 4;
@@ -976,7 +975,7 @@ export async function registerRoutes(
         matchStatus = 'live';
         matchResult = "Super Over In Progress";
       }
-    }}
+    }
 
     const finalMatchUpdated = await storage.getMatch(matchId);
     broadcastMatchUpdate(matchId, finalMatchUpdated);
