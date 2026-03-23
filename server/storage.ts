@@ -1,4 +1,4 @@
-import { User as UserModel, Team as TeamModel, Player as PlayerModel, Match as MatchModel, Collection as CollectionModel, Payment as PaymentModel, Tournament as TournamentModel, Expense as ExpenseModel, Notification as NotificationModel, TeamAsset as TeamAssetModel } from "@shared/schema";
+import { User as UserModel, Team as TeamModel, Player as PlayerModel, Match as MatchModel, Collection as CollectionModel, Payment as PaymentModel, Tournament as TournamentModel, Expense as ExpenseModel, Notification as NotificationModel, TeamAsset as TeamAssetModel, ScorecardUpload as ScorecardUploadModel } from "@shared/schema";
 import mongoose from "mongoose";
 
 export interface IStorage {
@@ -41,6 +41,16 @@ export interface IStorage {
 
   // Payment operations
   deletePayment(id: string): Promise<any>;
+
+  // Team amount edit operations
+  requestTeamAmountEdit(teamId: string): Promise<any>;
+  approveTeamAmountEdit(teamId: string): Promise<any>;
+  rejectTeamAmountEdit(teamId: string): Promise<any>;
+
+  // Scorecard upload operations
+  createScorecardUpload(data: any): Promise<any>;
+  getScorecardUploads(): Promise<any[]>;
+  updateScorecardUpload(id: string, updates: any): Promise<any>;
 }
 
 export class MongoStorage implements IStorage {
@@ -112,10 +122,13 @@ export class MongoStorage implements IStorage {
 
         if (batsmanId) {
           const bStats = getPlayer(batsmanId, ""); // Name already set or will be set
-          bStats.runs += (ball.runs || 0);
-          if (ball.extra !== 'wide') bStats.balls++;
-          if (ball.runs === 4) bStats.fours++;
-          if (ball.runs === 6) bStats.sixes++;
+          const countsForBatsman = (!ball.extra || ball.extra === 'noball') && (ball.runsOffBat !== false);
+          if (countsForBatsman) {
+            bStats.runs += (ball.runs || 0);
+            if (ball.runs === 4) bStats.fours++;
+            if (ball.runs === 6) bStats.sixes++;
+          }
+          if (!['wide', 'noball'].includes(ball.extra || "")) bStats.balls++;
           if (ball.wicket) bStats.dismissals++;
         }
 
@@ -212,10 +225,13 @@ export class MongoStorage implements IStorage {
       if (batsmanId) {
         const u = [...(match.playingXIA || []), ...(match.playingXIB || [])].find(px => (px._id?.toString() || px.toString()) === batsmanId) as any;
         const ps = getPlayerScore(batsmanId, u?.fullName || "Unknown");
-        ps.runs += (ball.runs || 0);
-        if (ball.extra !== 'wide') ps.balls++;
-        if (ball.runs === 4) ps.fours++;
-        if (ball.runs === 6) ps.sixes++;
+        const countsForBatsman = (!ball.extra || ball.extra === 'noball') && (ball.runsOffBat !== false);
+        if (countsForBatsman) {
+          ps.runs += (ball.runs || 0);
+          if (ball.runs === 4) ps.fours++;
+          if (ball.runs === 6) ps.sixes++;
+        }
+        if (!['wide', 'noball'].includes(ball.extra || "")) ps.balls++;
       }
 
       if (bowlerId) {
@@ -329,7 +345,7 @@ export class MongoStorage implements IStorage {
           currentBalls = 0;
         } else {
           currentRuns += (ball.runs || 0) + (['wide', 'noball'].includes(ball.extra) ? 1 : 0);
-          if (ball.extra !== 'wide') currentBalls++;
+          if (!['wide', 'noball'].includes(ball.extra || "")) currentBalls++;
         }
       }
 
@@ -423,9 +439,7 @@ export class MongoStorage implements IStorage {
     return await CollectionModel.findByIdAndDelete(id);
   }
 
-  async deletePayment(id: string): Promise<any> {
-    return await PaymentModel.findByIdAndDelete(id);
-  }
+  
 
   async updateUserStatus(id: string, updates: any): Promise<any> {
     return await UserModel.findByIdAndUpdate(id, { $set: updates }, { new: true });
@@ -675,8 +689,19 @@ export class MongoStorage implements IStorage {
       .populate('balls.batsman balls.bowler');
   }
 
-  async getMatches(): Promise<any[]> {
-    return await MatchModel.find()
+  async getMatches(participantId?: string, status?: string): Promise<any[]> {
+    const query: any = {};
+    if (status) query.status = status;
+    if (participantId) {
+      query.$or = [
+        { playingXIA: participantId },
+        { playingXIB: participantId },
+        { createdById: participantId },
+        { scorerId: participantId }
+      ];
+    }
+
+    return await MatchModel.find(query)
       .populate({ path: 'teamA', populate: { path: 'players adminId' } })
       .populate({ path: 'teamB', populate: { path: 'players adminId' } })
       .populate('playingXIA playingXIB battingTeam bowlingTeam striker nonStriker currentBowler scorerId createdById')
@@ -714,32 +739,48 @@ export class MongoStorage implements IStorage {
     return match;
   }
 
-  private async updateStatsAfterBall(match: any, ball: any): Promise<void> {
-    const { batsman, bowler, runs, extra, wicket, wicketType } = ball;
+  public async updateStatsAfterBall(match: any, ball: any): Promise<void> {
+    const { batsman, bowler, runs, extra, extraRuns, runsOffBat, wicket, wicketType } = ball;
     const batsmanId = batsman?._id || batsman;
     const bowlerId = bowler?._id || bowler;
 
     if (batsmanId) {
       const isWide = extra === 'wide';
-      const runsScored = runs || 0;
+      const isNoBall = extra === 'noball';
+      const isByeOrLegBye = extra === 'byes' || extra === 'legbyes';
+      
+      let batRuns = 0;
+      let countBall = true;
+
+      if (isWide) {
+        batRuns = 0;
+        countBall = false;
+      } else if (isNoBall) {
+        batRuns = runsOffBat ? (runs || 0) : 0;
+        countBall = false;
+      } else if (isByeOrLegBye) {
+        batRuns = 0;
+        countBall = true;
+      } else {
+        batRuns = runs || 0;
+        countBall = true;
+      }
+
       const player = await PlayerModel.findOneAndUpdate(
         { userId: batsmanId },
         { 
           $inc: { 
-            "stats.batting.runs": runsScored,
-            "stats.batting.ballsFaced": isWide ? 0 : 1,
-            "stats.batting.fours": runsScored === 4 ? 1 : 0,
-            "stats.batting.sixes": runsScored === 6 ? 1 : 0
+            "stats.batting.runs": batRuns,
+            "stats.batting.ballsFaced": countBall ? 1 : 0,
+            "stats.batting.fours": batRuns === 4 ? 1 : 0,
+            "stats.batting.sixes": batRuns === 6 ? 1 : 0
           }
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      // Calculate Strike Rate and update matches if needed
       if (player?.stats?.batting && player.stats.batting.ballsFaced > 0) {
         player.stats.batting.strikeRate = (player.stats.batting.runs / player.stats.batting.ballsFaced) * 100;
-        
-        // Ensure matches count is updated if it was zero
         if (player.stats.batting.matches === 0) {
           await this.recalculatePlayerStats(batsmanId);
         } else {
@@ -749,30 +790,53 @@ export class MongoStorage implements IStorage {
     }
 
     if (bowlerId) {
-      // Wicket credit to bowler rules:
-      // Credits: Bowled, Caught, LBW, Stumped, Hit Wicket.
-      // NO Credits: Run Out, Retired Out, Obstructing Field, Hit Ball Twice, Timed Out.
-      // Retired Hurt is NOT a wicket.
       const dismissalType = (wicketType || wicket || "").toLowerCase();
-      const bowlerWicketTypes = ['bowled', 'caught', 'lbw', 'stumped', 'hit wicket', 'out']; // 'out' is for legacy
+      const bowlerWicketTypes = ['bowled', 'caught', 'lbw', 'stumped', 'hit wicket', 'out'];
       const isWicket = !!wicket && bowlerWicketTypes.includes(dismissalType);
       
-      const isExtra = ['wide', 'noball'].includes(extra);
-      const runsConceded = (runs || 0) + (isExtra ? 1 : 0);
+      const isWide = extra === 'wide';
+      const isNoBall = extra === 'noball';
+      
+      let runsConceded = 0;
+      if (isWide) {
+        runsConceded = 1 + (extraRuns || 0);
+      } else if (isNoBall) {
+        runsConceded = 1 + (runs || 0); // No ball runs are always conceded by bowler (whether off bat or extra)
+      } else if (extra === 'byes' || extra === 'legbyes') {
+        runsConceded = 0; // Byes/Legbyes not added to bowler
+      } else {
+        runsConceded = runs || 0;
+      }
       
       const player = await PlayerModel.findOneAndUpdate(
         { userId: bowlerId },
         { 
           $inc: { 
             "stats.bowling.wickets": isWicket ? 1 : 0,
-            "stats.bowling.runsConceded": runsConceded
+            "stats.bowling.runsConceded": runsConceded,
+            "stats.bowling.ballsBowled": (isWide || isNoBall) ? 0 : 1
           }
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      if (player && player.stats?.bowling?.matches === 0) {
-        await this.recalculatePlayerStats(bowlerId);
+      if (player && player.stats?.bowling) {
+        // Calculate economy and average
+        const balls = player.stats.bowling.ballsBowled || 0;
+        if (balls > 0) {
+          player.stats.bowling.overs = Math.floor(balls / 6) + (balls % 6) / 10;
+          player.stats.bowling.economy = (player.stats.bowling.runsConceded / balls) * 6;
+          if (player.stats.bowling.wickets > 0) {
+            player.stats.bowling.average = player.stats.bowling.runsConceded / player.stats.bowling.wickets;
+            player.stats.bowling.strikeRate = balls / player.stats.bowling.wickets;
+          }
+        }
+
+        if (player.stats.bowling.matches === 0) {
+          await this.recalculatePlayerStats(bowlerId);
+        } else {
+          await player.save();
+        }
       }
     }
   }
@@ -1258,6 +1322,27 @@ export class MongoStorage implements IStorage {
   async getPendingVerifications(): Promise<any[]> {
     return await PaymentModel.find({ status: 'verification_pending' }).populate('memberId collectionId');
   }
+
+async deletePayment(id: string): Promise<any> {
+  const payment = await PaymentModel.findById(id).populate('collectionId');
+  if (!payment) return null;
+
+  if (payment.status === 'Paid') {
+    const amount =
+      payment.amount ||
+      payment.collectionId?.amountPerMember ||
+      0;
+
+    const collectionId =
+      payment.collectionId?._id || payment.collectionId;
+
+    await CollectionModel.findByIdAndUpdate(collectionId, {
+      $inc: { collectedAmt: -amount }
+    });
+  }
+
+  return await PaymentModel.findByIdAndDelete(id);
+}
 
   // Tournament operations
   async createTournament(tournamentData: any): Promise<any> {
@@ -2018,6 +2103,39 @@ export class MongoStorage implements IStorage {
   async getTeamAssetsTotal(): Promise<number> {
     const assets = await TeamAssetModel.find();
     return assets.reduce((acc, a) => acc + (a.amount || 0), 0);
+  }
+
+  // Team amount edit operations
+  async requestTeamAmountEdit(teamId: string): Promise<any> {
+    return await TeamModel.findByIdAndUpdate(teamId, {
+      amountEditRequest: { status: 'pending', requestedAt: new Date() }
+    }, { new: true });
+  }
+
+  async approveTeamAmountEdit(teamId: string): Promise<any> {
+    return await TeamModel.findByIdAndUpdate(teamId, {
+      amountEditRequest: { status: 'approved', requestedAt: new Date() }
+    }, { new: true });
+  }
+
+  async rejectTeamAmountEdit(teamId: string): Promise<any> {
+    return await TeamModel.findByIdAndUpdate(teamId, {
+      amountEditRequest: { status: 'rejected', requestedAt: new Date() }
+    }, { new: true });
+  }
+
+  // Scorecard upload operations
+  async createScorecardUpload(data: any): Promise<any> {
+    const scorecard = new ScorecardUploadModel(data);
+    return await scorecard.save();
+  }
+
+  async getScorecardUploads(): Promise<any[]> {
+    return await ScorecardUploadModel.find().populate('adminId').sort({ createdAt: -1 });
+  }
+
+  async updateScorecardUpload(id: string, updates: any): Promise<any> {
+    return await ScorecardUploadModel.findByIdAndUpdate(id, updates, { new: true });
   }
 }
 
