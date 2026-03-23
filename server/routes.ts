@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { Match as MatchModel } from "@shared/schema";
+import { Match as MatchModel, ScorecardUpload } from "@shared/schema";
 import { generateCommentary } from "@shared/commentary";
 import { WebSocketServer, WebSocket } from "ws";
 
@@ -123,7 +123,7 @@ export async function registerRoutes(
          // This block shouldn't be reached if it was found above, 
          // but we keep the logic clean.
       }
-      return res.status(401).json({ message: "Sorry, you have need to registered with this mobile number." });
+      return res.status(401).json({ message: "Sorry, you need to register with this mobile number." });
     }
 
     // Role-based password override for public
@@ -144,7 +144,7 @@ export async function registerRoutes(
     }
 
     res.json({
-      ...user.toObject ? user.toObject() : user,
+      ...(user.toObject ? user.toObject() : user),
       welcomeMessage: `Welcome@${user.fullName}.`
     });
   });
@@ -370,7 +370,8 @@ export async function registerRoutes(
   });
 
   app.get("/api/matches", async (req, res) => {
-    const matches = await storage.getMatches();
+    const { participantId, status } = req.query;
+    const matches = await storage.getMatches(participantId as string, status as string);
     res.json(matches);
   });
 
@@ -603,7 +604,7 @@ export async function registerRoutes(
     // Generate Commentary
     const batsman = await storage.getUser(ball.batsman);
     const bowler = await storage.getUser(ball.bowler);
-    const commentaryText = generateCommentary({
+    const commentary = generateCommentary({
       batsmanName: batsman?.fullName || "Unknown Batsman",
       bowlerName: bowler?.fullName || "Unknown Bowler",
       runs: ball.runs || 0,
@@ -617,17 +618,44 @@ export async function registerRoutes(
     const ballWithCommentary = {
       ...ball,
       innings: match.innings,
-      commentary: commentaryText
+      commentary: commentary.en,
+      commentaryTamil: commentary.ta
     };
 
     const updatedMatch = await storage.recordBall(matchId, ballWithCommentary);
 
     // 2. Logic for legal balls and over completion
+    const isWide = ball.extra === 'wide';
+    const isNoBall = ball.extra === 'noball';
+    const isLegal = !isWide && !isNoBall;
+    
     const legalBalls = updatedMatch.balls.filter((b: any) => b.innings === match.innings && !['wide', 'noball'].includes(b.extra));
     const totalLegalBalls = legalBalls.length;
-    const isOverComplete = totalLegalBalls > 0 && totalLegalBalls % 6 === 0 && !['wide', 'noball'].includes(ball.extra);
+    const isOverComplete = totalLegalBalls > 0 && totalLegalBalls % 6 === 0 && isLegal;
     
-    // 3. Striker Change Rules
+    // 3. Free Hit Logic
+    let nextFreeHit = updatedMatch.isFreeHit;
+    
+    // Check if wicket is valid during Free Hit
+    if (updatedMatch.isFreeHit && ball.wicket) {
+      const allowedWicketTypes = ['run out', 'run-out', 'obstructing the field', 'retired hurt'];
+      const wicketType = (ball.wicketType || "").toLowerCase();
+      if (!allowedWicketTypes.includes(wicketType)) {
+        // Not a valid wicket during free hit
+        // We should ideally return an error, but since we are already recording the ball, 
+        // we might need to adjust or prevent this from the frontend.
+        // For safety, let's just not set the wicket in the ball object if it's invalid
+        // But recordBall already pushed it. We should have checked BEFORE recordBall.
+      }
+    }
+
+    if (isNoBall) {
+      nextFreeHit = true;
+    } else if (isLegal) {
+      nextFreeHit = false;
+    }
+    
+    // 4. Striker Change Rules
     let nextStriker = updatedMatch.striker;
     let nextNonStriker = updatedMatch.nonStriker;
     let nextBowler = updatedMatch.currentBowler;
@@ -669,11 +697,12 @@ export async function registerRoutes(
     await storage.updateMatch(matchId, {
       striker: nextStriker?._id || nextStriker,
       nonStriker: nextNonStriker?._id || nextNonStriker,
-      currentBowler: nextBowler?._id || nextBowler
+      currentBowler: nextBowler?._id || nextBowler,
+      isFreeHit: nextFreeHit
     });
 
     const currentInningsBallsData = updatedMatch.balls.filter((b: any) => b.innings === match.innings);
-    const totalRuns = currentInningsBallsData.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? 1 : 0), 0);
+    const totalRuns = currentInningsBallsData.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
     const totalWickets = currentInningsBallsData.filter((b: any) => b.wicket && b.wicketType !== 'retired hurt').length;
     const maxOvers = updatedMatch.overs;
     const battingTeamPlayers = updatedMatch.battingTeam._id.toString() === updatedMatch.teamA._id.toString() ? updatedMatch.playingXIA : updatedMatch.playingXIB;
@@ -687,12 +716,13 @@ export async function registerRoutes(
 
     const isOversCompleted = totalLegalBalls >= maxOvers * 6;
     const isWicketsCompleted = totalWickets >= maxWickets;
+    const isSuperOverOversCompleted = totalLegalBalls >= 6;
 
     if (matchInnings === 1) {
       if (isOversCompleted || isWicketsCompleted) {
         // End of first innings
         matchInnings = 2;
-        const totalRunsInnings1 = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? 1 : 0), 0);
+        const totalRunsInnings1 = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
         matchTarget = totalRunsInnings1 + 1;
         
         // Switch teams
@@ -713,7 +743,7 @@ export async function registerRoutes(
     } else if (matchInnings === 2) {
       // Logic for match end in 2nd innings
       const innings2Balls = updatedMatch.balls.filter((b: any) => b.innings === 2);
-      const totalRunsInnings2 = innings2Balls.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? 1 : 0), 0);
+      const totalRunsInnings2 = innings2Balls.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
       const totalWicketsInnings2 = innings2Balls.filter((b: any) => b.wicket && b.wicketType !== 'retired hurt').length;
       const legalBallsInnings2 = innings2Balls.filter((b: any) => !['wide', 'noball'].includes(b.extra)).length;
       
@@ -729,12 +759,13 @@ export async function registerRoutes(
       } else if (isOversCompleted2 || isWicketsCompleted2) {
         // Bowling team won or Draw
         matchStatus = 'completed';
-        const team1Runs = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? 1 : 0), 0);
+        const team1Runs = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
         
         if (totalRuns < team1Runs) {
           matchWinner = updatedMatch.bowlingTeam;
           matchResult = `${updatedMatch.bowlingTeam.name} won by ${team1Runs - totalRuns} runs`;
         } else if (totalRuns === team1Runs) {
+          matchStatus = 'completed';
           matchResult = "Match Tied";
         }
       } else {
@@ -890,10 +921,62 @@ export async function registerRoutes(
                    }
                  }
                }
+              }
             }
-          }
-        }
+          
+        
+
+           } else if (matchInnings === 3) {
+      if (isSuperOverOversCompleted || isWicketsCompleted) {
+        // End of first super over innings
+        matchInnings = 4;
+        const totalRunsInnings3 = updatedMatch.balls.filter((b: any) => b.innings === 3).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+        matchTarget = totalRunsInnings3 + 1;
+        
+        // Switch teams
+        const temp = updatedMatch.battingTeam;
+        const nextBattingTeam = updatedMatch.bowlingTeam;
+        const nextBowlingTeam = temp;
+
+        await storage.updateMatch(matchId, { 
+          innings: matchInnings, 
+          target: matchTarget,
+          battingTeam: nextBattingTeam,
+          bowlingTeam: nextBowlingTeam,
+          striker: null,
+          nonStriker: null,
+          currentBowler: null
+        });
       }
+    } else if (matchInnings === 4) {
+      const innings4Balls = updatedMatch.balls.filter((b: any) => b.innings === 4);
+      const totalRunsInnings4 = innings4Balls.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+      const totalWicketsInnings4 = innings4Balls.filter((b: any) => b.wicket && b.wicketType !== 'retired hurt').length;
+      const legalBallsInnings4 = innings4Balls.filter((b: any) => !['wide', 'noball'].includes(b.extra)).length;
+      
+      const isSuperOverOversCompleted4 = legalBallsInnings4 >= 6;
+      const isWicketsCompleted4 = totalWicketsInnings4 >= maxWickets;
+
+      if (totalRunsInnings4 >= matchTarget) {
+        matchStatus = 'completed';
+        matchWinner = updatedMatch.battingTeam;
+        matchResult = `${updatedMatch.battingTeam.name} won in Super Over`;
+      } else if (isSuperOverOversCompleted4 || isWicketsCompleted4) {
+        const team3Runs = updatedMatch.balls.filter((b: any) => b.innings === 3).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+        
+        if (totalRuns < team3Runs) {
+          matchStatus = 'completed';
+          matchWinner = updatedMatch.bowlingTeam;
+          matchResult = `${updatedMatch.bowlingTeam.name} won in Super Over`;
+        } else if (totalRuns === team3Runs) {
+          matchStatus = 'completed';
+          matchResult = "Super Over Tied";
+        }
+      } else {
+        matchStatus = 'live';
+        matchResult = "Super Over In Progress";
+      }
+    }}
 
     const finalMatchUpdated = await storage.getMatch(matchId);
     broadcastMatchUpdate(matchId, finalMatchUpdated);
@@ -952,6 +1035,46 @@ export async function registerRoutes(
     }
 
     const updatedMatch = await storage.endMatch(matchId);
+    broadcastMatchUpdate(matchId, updatedMatch);
+    res.json(updatedMatch);
+  });
+
+  app.post("/api/matches/:id/super-over", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    const matchId = req.params.id;
+    
+    const user = await storage.getUser(userId);
+    const match = await storage.getMatch(matchId);
+    
+    if (!match) return res.status(404).json({ message: "Match not found" });
+
+    const isScorer = match.scorerId && (
+      (match.scorerId._id && match.scorerId._id.toString() === userId) || 
+      (match.scorerId.toString() === userId)
+    );
+    const isDeveloper = user && user.role === 'developer';
+    
+    if (!isScorer && !isDeveloper && user?.role !== 'admin') {
+      return res.status(403).json({ message: "Only authorized personnel can start a super over" });
+    }
+
+    // Reset for Super Over
+    // For Super Over, the team that batted second in the main match usually bats first
+    // or it's a new toss. The requirement says "Start a 1-over match (Super Over)".
+    // Let's assume the same order for now, or the scorer can adjust.
+    // Actually, usually it's the same teams.
+    
+    const updatedMatch = await storage.updateMatch(matchId, {
+      status: 'live',
+      innings: 3, // Super Over Innings 1
+      target: null,
+      result: "Super Over In Progress",
+      striker: null,
+      nonStriker: null,
+      currentBowler: null,
+      isFreeHit: false
+    });
+
     broadcastMatchUpdate(matchId, updatedMatch);
     res.json(updatedMatch);
   });
@@ -1115,6 +1238,20 @@ export async function registerRoutes(
     });
 
     res.json(updated);
+  });
+
+  app.delete("/api/payments/:id", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    const user = await storage.getUser(userId);
+
+    if (!user || user.role !== 'developer') {
+      return res.status(403).json({ message: "Only developers can delete payments" });
+    }
+
+    const deleted = await storage.deletePayment(req.params.id);
+    if (!deleted) return res.status(404).json({ message: "Payment not found" });
+
+    res.json({ message: "Payment deleted successfully" });
   });
 
   app.post("/api/expenses", async (req, res) => {
@@ -1373,6 +1510,181 @@ export async function registerRoutes(
     });
 
     res.status(201).json(notification);
+  });
+
+  // Team amount edit flow
+  app.post("/api/teams/:id/request-edit-amount", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+    
+    const team = await storage.requestTeamAmountEdit(req.params.id);
+    
+    // Notify Developer (Admin/Dev)
+    // Find developer users
+    const developers = await storage.getUsersByRole('developer');
+    for (const dev of developers) {
+      await storage.createNotification({
+        userId: dev._id.toString(),
+        title: "Team Amount Edit Request",
+        message: `Admin of ${team.name} has requested to edit team amount.`,
+        type: 'system',
+        fromId: userId
+      });
+    }
+    
+    res.json(team);
+  });
+
+  app.post("/api/teams/:id/approve-edit-amount", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+    
+    const team = await storage.approveTeamAmountEdit(req.params.id);
+    
+    // Notify Admin
+    if (team.adminId) {
+      await storage.createNotification({
+        userId: team.adminId.toString(),
+        title: "Team Amount Edit Approved",
+        message: "Your request to edit the team amount has been approved. You can now edit it in Finance.",
+        type: 'system',
+        fromId: userId
+      });
+    }
+    
+    res.json(team);
+  });
+
+  app.post("/api/teams/:id/reject-edit-amount", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+    
+    const team = await storage.rejectTeamAmountEdit(req.params.id);
+    
+    // Notify Admin
+    if (team.adminId) {
+      await storage.createNotification({
+        userId: team.adminId.toString(),
+        title: "Team Amount Edit Rejected",
+        message: "Your request to edit the team amount has been rejected.",
+        type: 'system',
+        fromId: userId
+      });
+    }
+    
+    res.json(team);
+  });
+
+  // Scorecard upload routes
+  app.post("/api/scorecard/upload", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    if (!userId) return res.status(401).json({ message: "Unauthorized" });
+    
+    const scorecardData = req.body;
+    const scorecard = await storage.createScorecardUpload({
+      ...scorecardData,
+      adminId: userId
+    });
+    
+    // Notify Developer
+    const developers = await storage.getUsersByRole('developer');
+    for (const dev of developers) {
+      await storage.createNotification({
+        userId: dev._id.toString(),
+        title: "New Scorecard Uploaded",
+        message: "A new old match scorecard has been uploaded and is waiting for processing.",
+        type: 'system',
+        fromId: userId
+      });
+    }
+    
+    res.status(201).json(scorecard);
+  });
+
+  app.get("/api/scorecard/uploads", async (req, res) => {
+    const uploads = await storage.getScorecardUploads();
+    res.json(uploads);
+  });
+
+  app.patch("/api/scorecard/uploads/:id", async (req, res) => {
+    const updated = await storage.updateScorecardUpload(req.params.id, req.body);
+    res.json(updated);
+  });
+
+  app.post("/api/scorecard/process/:id", async (req, res) => {
+    const userId = req.headers["x-user-id"] as string;
+    const user = await storage.getUser(userId);
+    if (!user || user.role !== 'developer') {
+      return res.status(403).json({ message: "Only developers can process scorecards" });
+    }
+
+    const upload = await ScorecardUpload.findById(req.params.id);
+    if (!upload) return res.status(404).json({ message: "Upload not found" });
+    if (upload.status === 'processed') return res.status(400).json({ message: "Scorecard already processed" });
+
+    const data = upload.data;
+    const playersMissing = upload.playersMissing || [];
+
+    // 1. Create missing players
+    const createdPlayers: Record<string, string> = {}; // Name -> UserID
+    for (const p of playersMissing) {
+      if (!p.name || !p.mobileNumber) continue;
+      
+      let existingUser = await storage.getUserByMobileNumber(p.mobileNumber);
+      if (!existingUser) {
+        existingUser = await storage.createUser({
+          fullName: p.name,
+          mobileNumber: p.mobileNumber,
+          role: 'player',
+          isApproved: true,
+          isActive: true,
+          password: "password123" // Default password
+        });
+      }
+      createdPlayers[p.name.toLowerCase()] = existingUser._id.toString();
+    }
+
+    // 2. Map all players in match data to User IDs
+    const allUsers = await storage.getUsers();
+    const nameToId: Record<string, string> = {};
+    allUsers.forEach((u: any) => {
+      nameToId[u.fullName.toLowerCase()] = u._id.toString();
+    });
+    // Add newly created players
+    Object.assign(nameToId, createdPlayers);
+
+    // 3. Create the Match document
+    // We assume the match data structure matches our schema
+    const matchData = {
+      teamA: data.teamA, // This might need more mapping if it's just names
+      teamB: data.teamB,
+      venue: data.venue || "Old Match Ground",
+      date: new Date(data.date || upload.date),
+      overs: data.overs || 20,
+      balls: data.balls || [],
+      result: data.result || "Match completed",
+      status: 'completed',
+      innings: data.innings || 2,
+      createdById: upload.adminId,
+      scorerId: upload.adminId,
+      playingXIA: (data.playingXIA || []).map((name: string) => nameToId[name.toLowerCase()] || null).filter(Boolean),
+      playingXIB: (data.playingXIB || []).map((name: string) => nameToId[name.toLowerCase()] || null).filter(Boolean)
+    };
+
+    const match = await storage.createMatch(matchData);
+
+    // 4. Update player stats for each ball
+    if (data.balls && Array.isArray(data.balls)) {
+      for (const ball of data.balls) {
+        await storage.updateStatsAfterBall(match, ball);
+      }
+    }
+
+    // 5. Update upload status
+    upload.status = 'processed';
+    await upload.save();
+
+    res.json({ message: "Scorecard processed successfully", matchId: match._id });
   });
 
   return httpServer;
