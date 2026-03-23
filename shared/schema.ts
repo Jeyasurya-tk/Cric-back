@@ -35,6 +35,10 @@ const teamSchema = new mongoose.Schema({
     totalRuns: { type: Number, default: 0 },
     totalWickets: { type: Number, default: 0 },
     nrr: { type: Number, default: 0 }
+  },
+  amountEditRequest: {
+    status: { type: String, enum: ['none', 'pending', 'approved', 'rejected'], default: 'none' },
+    requestedAt: { type: Date }
   }
 });
 
@@ -124,6 +128,7 @@ const matchSchema = new mongoose.Schema({
     ball: Number,
     runs: Number,
     extra: String,
+    extraRuns: { type: Number, default: 0 },
     wicket: String,
     wicketType: String,
     wicketFielder: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -132,7 +137,9 @@ const matchSchema = new mongoose.Schema({
     bowler: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     shotDirection: String,
     shotAngle: Number,
-    commentary: String
+    runsOffBat: { type: Boolean, default: true },
+    commentary: String,
+    commentaryTamil: String
   }],
   awards: {
     manOfTheMatch: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -155,6 +162,7 @@ const matchSchema = new mongoose.Schema({
     bestBowler: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
   },
   status: { type: String, enum: ['scheduled', 'live', 'completed', 'abandoned', 'rescheduled', 'upcoming', 'delayed', 'walkover'], default: 'scheduled' },
+  isFreeHit: { type: Boolean, default: false },
   matchNumber: { type: Number },
   liveLink: { type: String },
   date: { type: Date, default: Date.now }
@@ -281,3 +289,22 @@ const notificationSchema = new mongoose.Schema({
 });
 
 export const Notification = mongoose.models.Notification || mongoose.model("Notification", notificationSchema);
+
+// Scorecard Upload Schema
+const scorecardUploadSchema = new mongoose.Schema({
+  adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  teamA: String,
+  teamB: String,
+  date: { type: Date, default: Date.now },
+  tournamentName: String,
+  playersMissing: [{
+    name: String,
+    mobileNumber: String,
+    role: String
+  }],
+  status: { type: String, enum: ['pending', 'processed'], default: 'pending' },
+  data: mongoose.Schema.Types.Mixed,
+  createdAt: { type: Date, default: Date.now }
+});
+
+export const ScorecardUpload = mongoose.models.ScorecardUpload || mongoose.model("ScorecardUpload", scorecardUploadSchema);
