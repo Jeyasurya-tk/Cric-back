@@ -123,7 +123,7 @@ export async function registerRoutes(
          // This block shouldn't be reached if it was found above, 
          // but we keep the logic clean.
       }
-      return res.status(401).json({ message: "Sorry, you have need to registered with this mobile number." });
+      return res.status(401).json({ message: "Sorry, you need to register with this mobile number." });
     }
 
     // Role-based password override for public
@@ -145,7 +145,7 @@ export async function registerRoutes(
 
     res.json({
       ...user.toObject ? user.toObject() : user,
-      welcomeMessage: `Welcome@${user.fullName}.`
+      welcomeMessage: `Welcome, ${user.fullName}.`
     });
   });
 
@@ -353,7 +353,8 @@ export async function registerRoutes(
 
     if (user.role === 'captain') {
       const team = await storage.getTeam(teamA);
-      if (!team || (team.adminId && team.adminId._id.toString() !== user._id.toString())) {
+      const teamAdminId = team?.adminId?._id ? team.adminId._id.toString() : (team?.adminId ? team.adminId.toString() : null);
+      if (!team || teamAdminId !== user._id.toString()) {
         return res.status(403).json({ message: "You can only create matches for your own team" });
       }
     }
@@ -395,8 +396,15 @@ export async function registerRoutes(
 
     const updates: any = {};
     if (venue !== undefined) updates.venue = venue;
-    if (startDate !== undefined) updates.date = new Date(startDate || date);
-    if (date !== undefined && startDate === undefined) updates.date = new Date(date);
+    
+    // Handle date updates safely
+    const newDate = startDate || date;
+    if (newDate) {
+      const parsedDate = new Date(newDate);
+      if (!isNaN(parsedDate.getTime())) {
+        updates.date = parsedDate;
+      }
+    }
 
     const match = await storage.updateMatch(req.params.id, updates);
 
@@ -622,6 +630,19 @@ export async function registerRoutes(
       commentaryTamil: commentary.ta
     };
 
+    // Free Hit Wicket Validation
+    if (match.isFreeHit && ballWithCommentary.wicket) {
+      const allowedWicketTypes = ['run out', 'run-out', 'obstructing the field', 'retired hurt'];
+      const wicketType = (ballWithCommentary.wicketType || "").toLowerCase();
+      if (!allowedWicketTypes.includes(wicketType)) {
+        // Not a valid wicket during free hit - clear wicket data
+        delete ballWithCommentary.wicket;
+        delete ballWithCommentary.wicketType;
+        delete ballWithCommentary.wicketFielder;
+        delete ballWithCommentary.wicketBatsman;
+      }
+    }
+
     const updatedMatch = await storage.recordBall(matchId, ballWithCommentary);
 
     // 2. Logic for legal balls and over completion
@@ -636,19 +657,6 @@ export async function registerRoutes(
     // 3. Free Hit Logic
     let nextFreeHit = updatedMatch.isFreeHit;
     
-    // Check if wicket is valid during Free Hit
-    if (updatedMatch.isFreeHit && ball.wicket) {
-      const allowedWicketTypes = ['run out', 'run-out', 'obstructing the field', 'retired hurt'];
-      const wicketType = (ball.wicketType || "").toLowerCase();
-      if (!allowedWicketTypes.includes(wicketType)) {
-        // Not a valid wicket during free hit
-        // We should ideally return an error, but since we are already recording the ball, 
-        // we might need to adjust or prevent this from the frontend.
-        // For safety, let's just not set the wicket in the ball object if it's invalid
-        // But recordBall already pushed it. We should have checked BEFORE recordBall.
-      }
-    }
-
     if (isNoBall) {
       nextFreeHit = true;
     } else if (isLegal) {
@@ -702,10 +710,12 @@ export async function registerRoutes(
     });
 
     const currentInningsBallsData = updatedMatch.balls.filter((b: any) => b.innings === match.innings);
-    const totalRuns = currentInningsBallsData.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+    const totalRuns = currentInningsBallsData.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
     const totalWickets = currentInningsBallsData.filter((b: any) => b.wicket && b.wicketType !== 'retired hurt').length;
     const maxOvers = updatedMatch.overs;
-    const battingTeamPlayers = updatedMatch.battingTeam._id.toString() === updatedMatch.teamA._id.toString() ? updatedMatch.playingXIA : updatedMatch.playingXIB;
+    const battingTeamId = updatedMatch.battingTeam?._id?.toString() || updatedMatch.battingTeam?.toString();
+    const teamAId = updatedMatch.teamA?._id?.toString() || updatedMatch.teamA?.toString();
+    const battingTeamPlayers = battingTeamId === teamAId ? updatedMatch.playingXIA : updatedMatch.playingXIB;
     const maxWickets = (battingTeamPlayers?.length || 11) - 1;
 
     let matchStatus = updatedMatch.status;
@@ -722,7 +732,7 @@ export async function registerRoutes(
       if (isOversCompleted || isWicketsCompleted) {
         // End of first innings
         matchInnings = 2;
-        const totalRunsInnings1 = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+        const totalRunsInnings1 = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
         matchTarget = totalRunsInnings1 + 1;
         
         // Switch teams
@@ -743,7 +753,7 @@ export async function registerRoutes(
     } else if (matchInnings === 2) {
       // Logic for match end in 2nd innings
       const innings2Balls = updatedMatch.balls.filter((b: any) => b.innings === 2);
-      const totalRunsInnings2 = innings2Balls.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+      const totalRunsInnings2 = innings2Balls.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
       const totalWicketsInnings2 = innings2Balls.filter((b: any) => b.wicket && b.wicketType !== 'retired hurt').length;
       const legalBallsInnings2 = innings2Balls.filter((b: any) => !['wide', 'noball'].includes(b.extra)).length;
       
@@ -759,12 +769,12 @@ export async function registerRoutes(
       } else if (isOversCompleted2 || isWicketsCompleted2) {
         // Bowling team won or Draw
         matchStatus = 'completed';
-        const team1Runs = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+        const team1Runs = updatedMatch.balls.filter((b: any) => b.innings === 1).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
         
-        if (totalRuns < team1Runs) {
+        if (totalRunsInnings2 < team1Runs) {
           matchWinner = updatedMatch.bowlingTeam;
-          matchResult = `${updatedMatch.bowlingTeam.name} won by ${team1Runs - totalRuns} runs`;
-        } else if (totalRuns === team1Runs) {
+          matchResult = `${updatedMatch.bowlingTeam.name} won by ${team1Runs - totalRunsInnings2} runs`;
+        } else if (totalRunsInnings2 === team1Runs) {
           matchStatus = 'completed';
           matchResult = "Match Tied";
         }
@@ -919,17 +929,16 @@ export async function registerRoutes(
                        type: 'tournament'
                      });
                    }
-                 }
-               }
             }
           }
-        
+        }
       }
-    } else if (matchInnings === 3) {
+    }
+  } else if (matchInnings === 3) {
       if (isSuperOverOversCompleted || isWicketsCompleted) {
         // End of first super over innings
         matchInnings = 4;
-        const totalRunsInnings3 = updatedMatch.balls.filter((b: any) => b.innings === 3).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+        const totalRunsInnings3 = updatedMatch.balls.filter((b: any) => b.innings === 3).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
         matchTarget = totalRunsInnings3 + 1;
         
         // Switch teams
@@ -949,7 +958,7 @@ export async function registerRoutes(
       }
     } else if (matchInnings === 4) {
       const innings4Balls = updatedMatch.balls.filter((b: any) => b.innings === 4);
-      const totalRunsInnings4 = innings4Balls.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+      const totalRunsInnings4 = innings4Balls.reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
       const totalWicketsInnings4 = innings4Balls.filter((b: any) => b.wicket && b.wicketType !== 'retired hurt').length;
       const legalBallsInnings4 = innings4Balls.filter((b: any) => !['wide', 'noball'].includes(b.extra)).length;
       
@@ -961,13 +970,13 @@ export async function registerRoutes(
         matchWinner = updatedMatch.battingTeam;
         matchResult = `${updatedMatch.battingTeam.name} won in Super Over`;
       } else if (isSuperOverOversCompleted4 || isWicketsCompleted4) {
-        const team3Runs = updatedMatch.balls.filter((b: any) => b.innings === 3).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball', 'byes', 'legbyes'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
+        const team3Runs = updatedMatch.balls.filter((b: any) => b.innings === 3).reduce((acc: number, b: any) => acc + (b.runs || 0) + (['wide', 'noball'].includes(b.extra) ? (b.extraRuns || 1) : 0), 0);
         
-        if (totalRuns < team3Runs) {
+        if (totalRunsInnings4 < team3Runs) {
           matchStatus = 'completed';
           matchWinner = updatedMatch.bowlingTeam;
           matchResult = `${updatedMatch.bowlingTeam.name} won in Super Over`;
-        } else if (totalRuns === team3Runs) {
+        } else if (totalRunsInnings4 === team3Runs) {
           matchStatus = 'completed';
           matchResult = "Super Over Tied";
         }
@@ -1229,12 +1238,15 @@ export async function registerRoutes(
     if (!updated) return res.status(404).json({ message: "Payment not found" });
 
     // Send notification to the player
-    await storage.createNotification({
-      userId: updated.memberId._id,
-      title: `Payment ${status === 'Paid' ? 'Verified' : 'Rejected'}`,
-      message: `Your payment for "${updated.collectionId.title}" has been ${status === 'Paid' ? 'verified successfully.' : 'rejected. Please contact admin.'}`,
-      type: 'payment'
-    });
+    const memberId = updated.memberId?._id?.toString() || updated.memberId?.toString();
+    if (memberId) {
+      await storage.createNotification({
+        userId: memberId,
+        title: `Payment ${status === 'Paid' ? 'Verified' : 'Rejected'}`,
+        message: `Your payment for "${updated.collectionId?.title || 'Collection'}" has been ${status === 'Paid' ? 'verified successfully.' : 'rejected. Please contact admin.'}`,
+        type: 'payment'
+      });
+    }
 
     res.json(updated);
   });
