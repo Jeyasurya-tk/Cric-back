@@ -393,10 +393,15 @@ export async function registerRoutes(
     const existingMatch = await storage.getMatch(req.params.id);
     if (!existingMatch) return res.status(404).json({ message: "Match not found" });
 
-    const updates: any = {};
-    if (venue !== undefined) updates.venue = venue;
-    if (startDate !== undefined) updates.date = new Date(startDate || date);
-    if (date !== undefined && startDate === undefined) updates.date = new Date(date);
+    const updates: any = { ...req.body };
+    
+    // Handle date conversion specifically
+    if (updates.startDate !== undefined) {
+      updates.date = new Date(updates.startDate || updates.date);
+      delete updates.startDate;
+    } else if (updates.date !== undefined) {
+      updates.date = new Date(updates.date);
+    }
 
     const match = await storage.updateMatch(req.params.id, updates);
 
